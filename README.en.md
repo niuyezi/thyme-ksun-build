@@ -8,7 +8,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 
 - Pulls the exact kernel source commit matching the device (`fd144b4b...`, kernel `4.19.325-perf`)
 - Builds with the device's own `/proc/config.gz` config
-- Replaces the stock KernelSU with KernelSU-Next (`v3.4.2` by default, the driver release matching the latest manager)
+- Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
 - Outputs the kernel image, build log, and SHA-256 checksums
 
 ## How to use
@@ -27,7 +27,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 | `kernel_ref` | `fd144b4b278e...` | Exact source commit (from device `uname`) |
 | `defconfig` | `thyme_defconfig` | Fallback defconfig (device config takes priority) |
 | `enable_ksu` | `true` | Replace stock KernelSU with KernelSU-Next |
-| `ksun_ref` | `v3.4.2` | KernelSU-Next driver release (kept in sync with the manager) |
+| `ksun_ref` | `legacy` | KernelSU-Next branch (required for 4.19 non-GKI) |
 | `clang_version` | `clang-r596125` | AOSP prebuilt clang version |
 | `build_baseline` | `false` | Also build an unmodified baseline first |
 
@@ -62,7 +62,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 | Project | Use | Link | License |
 |---|---|---|---|
 | Flicker kernel tree | Kernel source, `seventeen` branch | https://github.com/Flicker-Android-Devices/kernel_xiaomi_sm8250 | GPL-2.0 |
-| KernelSU-Next | Driver source, `v3.4.2` release | https://github.com/KernelSU-Next/KernelSU-Next | GPL-3.0 |
+| KernelSU-Next | Built-in driver, `legacy` branch | https://github.com/KernelSU-Next/KernelSU-Next | GPL-3.0 |
 | PixelOS libufdt | Python3 `mkdtboimg.py` | https://github.com/PixelOS-AOSP/android_system_libufdt | Apache-2.0 |
 | AOSP Clang | `clang-r596125` cross toolchain | https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 | Apache-2.0 / LLVM exception |
 
@@ -72,7 +72,7 @@ The workflow and scripts in this repo are licensed under [MIT](LICENSE). Referen
 
 ## Note
 
-The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack from your original `boot.img`: keep the header, ramdisk and other parts, and replace the kernel.
+The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack it with your original `boot.img` header (cmdline, pagesize, base, offsets, OS version/patch level) and ramdisk.
 
 This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
 

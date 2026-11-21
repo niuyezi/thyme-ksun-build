@@ -27,7 +27,7 @@ on:
         description: "KernelSU-Next branch/tag/commit"
         required: true
         type: string
-        default: "v3.4.2"
+        default: "legacy"
       clang_version:
         description: "AOSP prebuilt clang directory name"
         required: true
@@ -129,8 +129,6 @@ jobs:
 
       # Rebuild the KSU config from the device's own /proc/config.gz every run, so
       # a stale or hand-edited input/device-ksun.config can never break the build.
-      # v3.4.2 driver Kconfig depends on KPROBES and EXT4_FS; the device config
-      # already has EXT4_FS=y but leaves KPROBES off, so enable it here.
       - name: Prepare KernelSU-Next config
         if: ${{ inputs.enable_ksu }}
         run: |
@@ -138,40 +136,34 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           src = Path('input/device.config').read_text(encoding='utf-8', errors='replace').splitlines()
-          ksu_names = {
-              'CONFIG_KSU', 'CONFIG_KSU_DEBUG', 'CONFIG_KSU_DISABLE_MANAGER',
-              'CONFIG_KSU_DISABLE_POLICY', 'CONFIG_KSU_ALLOWLIST_WORKAROUND',
-              'CONFIG_KSU_MANUAL_HOOK', 'CONFIG_KSU_KPROBES_HOOK',
-              'CONFIG_KSU_SYSCALL_TABLE_HOOK', 'CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER',
-              'CONFIG_KPROBES', 'CONFIG_KPROBE_EVENTS', 'CONFIG_KRETPROBES',
-          }
-          def is_managed(l):
+          def is_ksu(l):
               s = l.strip()
               if s.startswith('# ') and ' is not set' in s:
-                  return s.split()[1] in ksu_names
-              if s.startswith('#') or not s:
-                  return False
-              return s.split('=', 1)[0] in ksu_names
-          out = [l for l in src if not is_managed(l)]
+                  return s.split()[1].startswith('CONFIG_KSU')
+              if '=' in s and not s.startswith('#'):
+                  return s.split('=', 1)[0].startswith('CONFIG_KSU')
+              return False
+          out = [l for l in src if not is_ksu(l)]
+          # 4.19 is non-GKI: use syscall-table hook, NOT the kprobes hook
+          # (Kconfig says kprobes hook must not be used below 5.10). Strip any
+          # stale forced kprobes lines left by earlier config generations.
+          forced = {'CONFIG_KPROBES=y', 'CONFIG_KPROBE_EVENTS=y', 'CONFIG_KRETPROBES=y'}
+          out = [l for l in out if l.strip() not in forced]
           out += [
-              'CONFIG_KPROBES=y',
-              'CONFIG_KPROBE_EVENTS=y',
-              'CONFIG_KRETPROBES=y',
               'CONFIG_KSU=y',
-              '# CONFIG_KSU_DEBUG is not set',
-              '# CONFIG_KSU_DISABLE_MANAGER is not set',
-              '# CONFIG_KSU_DISABLE_POLICY is not set',
-              '# CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER is not set',
+              '# CONFIG_KSU_MANUAL_HOOK is not set',
+              '# CONFIG_KSU_KPROBES_HOOK is not set',
+              'CONFIG_KSU_SYSCALL_TABLE_HOOK=y',
           ]
           Path('input/device-ksun.config').write_text('\n'.join(out) + '\n', encoding='utf-8')
           print('wrote input/device-ksun.config:', len(out), 'lines')
           PY
-          echo "--- KSU/KPROBES config tail ---"
-          tail -n 12 input/device-ksun.config
-          echo "--- must be single CONFIG_KSU=y ---"
-          test "$(grep -c '^CONFIG_KSU=y' input/device-ksun.config)" = "1"
-          echo "--- must have KPROBES for KSU v3.4.2 ---"
-          grep -q '^CONFIG_KPROBES=y' input/device-ksun.config
+          echo "--- KSU config tail ---"
+          tail -n 8 input/device-ksun.config
+          echo "--- must be empty: forced KPROBES ---"
+          grep -n '^CONFIG_KPROBES=y' input/device-ksun.config || echo "OK: no forced KPROBES"
+          echo "--- must be empty: duplicate CONFIG_KSU ---"
+          test "$(grep -c '^CONFIG_KSU=y' input/device-ksun.config)" = "1" && echo "OK: single CONFIG_KSU=y"
 
       - name: Build unmodified baseline
         if: ${{ inputs.build_baseline }}
@@ -285,7 +277,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fLSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/$KSU_REF/kernel/setup.sh" \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" \
             -o ksu_setup.sh
           echo "setup.sh sha256:"
           sha256sum ksu_setup.sh
@@ -303,66 +295,70 @@ jobs:
           grep -n 'kernelsu' kernel/drivers/Makefile || true
           grep -n 'kernelsu' kernel/drivers/Kconfig || true
 
-      # v3.4.2 targets modern (5.x/6.x) kernels: its file_wrapper.c assigns
-      # struct file_operations.iopoll and .remap_file_range and uses
-      # REMAP_FILE_DEDUP, none of which exist in this 4.19 tree. The legacy
-      # branch keeps the matching LINUX_VERSION_CODE guards; apply the same
-      # guards to v3.4.2 so it builds on 4.19 without changing the
-      # manager-facing driver version.
-      - name: Patch KSU v3.4.2 driver for 4.19 API
+      # KernelSU-Next legacy assumes kernels <5.8 lack copy_to_kernel_nofault()
+      # and that can_umount() is spelled "static int". This PixelOS 4.19 tree
+      # backported copy_to_kernel_nofault() and uses "static inline int
+      # can_umount", so the shipped Kbuild injects a duplicate definition and
+      # the <5.8 shim macro rewrites the uaccess.h prototype into garbage.
+      # Both were the real cause of run #4 "Build final kernel" exit 2.
+      - name: Patch KSU-Next for 4.19 compatibility
         if: ${{ inputs.enable_ksu }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          f = Path('kernel/drivers/kernelsu/infra/file_wrapper.c')
-          assert f.is_file(), 'file_wrapper.c missing'
-          t = f.read_text(encoding='utf-8')
-          if 'ksu_wrapper_remap_file_range' not in t or \
-             '#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)' in t:
-              print('4.19 guards already present or layout differs; skipping')
-          else:
-              pairs = [
-                  ('#else\nstatic int ksu_wrapper_iopoll(struct kiocb *kiocb, bool spin)',
-                   '#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\nstatic int ksu_wrapper_iopoll(struct kiocb *kiocb, bool spin)'),
-                  ('static loff_t ksu_wrapper_remap_file_range(struct file *file_in, loff_t pos_in,',
-                   '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\nstatic loff_t ksu_wrapper_remap_file_range(struct file *file_in, loff_t pos_in,'),
-                  ('    }\n}\n\nstatic int ksu_wrapper_fadvise',
-                   '    }\n}\n#endif /* >= 4.20 */\n\nstatic int ksu_wrapper_fadvise'),
-                  ('    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;',
-                   '#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\n#endif'),
-                  ('    p->ops.remap_file_range =\n        fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;',
-                   '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)\n    p->ops.remap_file_range =\n        fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\n#endif'),
-              ]
-              for old, new in pairs:
-                  c = t.count(old)
-                  assert c == 1, 'patch target not unique (%d): %r' % (c, old[:70])
-                  t = t.replace(old, new)
-              f.write_text(t, encoding='utf-8')
-              t2 = f.read_text(encoding='utf-8')
-              assert t2.count('#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 0)') == 2
-              assert '#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)' in t2
-              print('OK: 4.19 API guards applied to file_wrapper.c')
-          PY
+          import re
+          ksu = Path('kernel/drivers/kernelsu')
+          assert ksu.is_dir(), 'KSU driver dir missing'
+          real = ksu.resolve()
+          print('KSU source dir:', real)
+          kb = real / 'Kbuild'
+          pm = real / 'hook' / 'patch_memory.c'
+          assert kb.is_file(), 'Kbuild missing'
+          assert pm.is_file(), 'hook/patch_memory.c missing'
 
-      # KSU v3.4.2 no longer ships the legacy <5.8 copy_to_kernel_nofault shim
-      # or the Kbuild can_umount() injection. It uses KPROBES and the in-tree
-      # syscall hook sources. Keep this step as a compatibility audit instead
-      # of patching legacy-only code that is not present in v3.4.2.
-      - name: Audit KSU-Next driver integration
-        if: ${{ inputs.enable_ksu }}
-        run: |
-          set -euo pipefail
-          ksu="kernel/drivers/kernelsu"
-          test -d "$ksu"
-          test -f "$ksu/Kconfig"
-          test -f "$ksu/Kbuild"
-          test -f "$ksu/hook/arm64/syscall_hook.c"
-          test -f "$ksu/hook/arm64/patch_memory.c"
-          grep -q '^config KSU' "$ksu/Kconfig"
-          grep -q 'depends on KPROBES' "$ksu/Kconfig"
-          grep -q 'copy_to_kernel_nofault' "$ksu/hook/arm64/patch_memory.c"
-          echo "OK: KSU v3.4.2 syscall-hook driver integrated; no legacy shim patch needed"
+          # Fix 1: KSU detects can_umount() with "^static int can_umount", but
+          # this 4.19 tree has "static inline int can_umount" -> Kbuild injects
+          # a duplicate definition into fs/namespace.c -> redefinition error.
+          t = kb.read_text(encoding='utf-8')
+          pat1 = re.compile(r'(grep\s+-Eq\s+["\'])\^static int can_umount(["\'])')
+          hits1 = pat1.findall(t)
+          if len(hits1) != 1:
+              print('!! can_umount guard not matched exactly once. Lines containing can_umount:')
+              for i, line in enumerate(t.splitlines(), 1):
+                  if 'can_umount' in line:
+                      print(f'  {i}: {line}')
+              raise SystemExit(f'expected 1 can_umount grep, found {len(hits1)}')
+          t = pat1.sub(lambda m: m.group(1) + '^static (inline )?int can_umount' + m.group(2), t)
+          kb.write_text(t, encoding='utf-8')
+
+          # Fix 2: this 4.19 kernel backported copy_to_kernel_nofault()
+          # (declared in uaccess.h, implemented in mm/maccess.c), but KSU's
+          # <5.8 shim re-#defines it to probe_kernel_write(), which rewrites
+          # the uaccess.h prototype into invalid C -> "type specifier missing".
+          p = pm.read_text(encoding='utf-8')
+          pat2 = re.compile(r'#if\s+LINUX_VERSION_CODE\s*<\s*KERNEL_VERSION\(5,\s*8,\s*0\)')
+          hits2 = pat2.findall(p)
+          if len(hits2) != 1:
+              print('!! 5.8 version guard not matched exactly once. Lines containing KERNEL_VERSION:')
+              for i, line in enumerate(p.splitlines(), 1):
+                  if 'KERNEL_VERSION' in line:
+                      print(f'  {i}: {line}')
+              raise SystemExit(f'expected 1 version guard, found {len(hits2)}')
+          p = pat2.sub('#if 0  /* 4.19 already provides copy_to_kernel_nofault() */', p)
+          pm.write_text(p, encoding='utf-8')
+
+          # Verify by reading the files back. A shell `grep` under `set -e`
+          # silently kills the step when its pattern drifts from the text
+          # actually written, so all verification lives here instead.
+          kb_txt = kb.read_text(encoding='utf-8')
+          pm_txt = pm.read_text(encoding='utf-8')
+          assert '^static (inline )?int can_umount' in kb_txt, 'patch 1 did not persist'
+          assert '#if 0  /* 4.19 already provides copy_to_kernel_nofault() */' in pm_txt, 'patch 2 did not persist'
+          print('KSU 4.19 compatibility patches applied and verified')
+          print('  patch1:', [l for l in kb_txt.splitlines() if '(inline )?int can_umount' in l][:1])
+          print('  patch2:', [l for l in pm_txt.splitlines() if '#if 0' in l][:1])
+          PY
 
       - name: Build final kernel
         working-directory: kernel
@@ -381,8 +377,8 @@ jobs:
           else
             make $MAKE_ARGS "$DEFCONFIG"
           fi
-          echo "--- resolved KSU / KPROBES config ---"
-          grep -E '^#? ?CONFIG_(KSU|KSU_DEBUG|KSU_DISABLE_MANAGER|KSU_DISABLE_POLICY|KPROBES|KPROBE_EVENTS|KRETPROBES)[ =]' ../out/final/.config || true
+          echo "--- resolved KSU / hook config (must show a hook =y) ---"
+          grep -E '^#? ?CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES) ' ../out/final/.config || true
           cp ../out/final/.config ../final-defconfig.config
           make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee ../build-final.log
           test -f ../out/final/arch/arm64/boot/Image
@@ -400,7 +396,7 @@ jobs:
           {
             if [ ! -s build-final.log ]; then
               echo "!! build-final.log is missing or EMPTY: the final kernel build did NOT run."
-              echo "!! The real failure is in a PRECEDING step (commonly 'Audit KSU-Next driver integration' or config preparation)."
+              echo "!! The real failure is in a PRECEDING step (commonly 'Patch KSU-Next for 4.19 compatibility')."
               echo "!! Open that step's log in the Actions UI instead of looking for compiler errors here."
               echo
             fi
