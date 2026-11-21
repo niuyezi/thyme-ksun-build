@@ -93,7 +93,14 @@ jobs:
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             toolchains/clang-aosp
           git -C toolchains/clang-aosp sparse-checkout set "$CLANG_VERSION"
-          echo "$GITHUB_WORKSPACE/toolchains/clang-aosp/$CLANG_VERSION/bin" >> "$GITHUB_PATH"
+          CLANG_BIN="$GITHUB_WORKSPACE/toolchains/clang-aosp/$CLANG_VERSION/bin"
+          test -x "$CLANG_BIN/clang" || {
+            echo "clang not found at $CLANG_BIN/clang" >&2
+            ls -la "$GITHUB_WORKSPACE/toolchains/clang-aosp" >&2 || true
+            exit 1
+          }
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+          export PATH="$CLANG_BIN:$PATH"
           clang --version | head -n 2
           ld.lld --version | head -n 1
           aarch64-linux-gnu-gcc --version | head -n 1
