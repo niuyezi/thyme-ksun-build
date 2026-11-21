@@ -269,12 +269,18 @@ jobs:
               raise SystemExit(f'expected 1 version guard, found {len(hits2)}')
           p = pat2.sub('#if 0  /* 4.19 already provides copy_to_kernel_nofault() */', p)
           pm.write_text(p, encoding='utf-8')
-          print('KSU 4.19 compatibility patches applied')
+
+          # Verify by reading the files back. A shell `grep` under `set -e`
+          # silently kills the step when its pattern drifts from the text
+          # actually written, so all verification lives here instead.
+          kb_txt = kb.read_text(encoding='utf-8')
+          pm_txt = pm.read_text(encoding='utf-8')
+          assert '^static (inline )?int can_umount' in kb_txt, 'patch 1 did not persist'
+          assert '#if 0  /* 4.19 already provides copy_to_kernel_nofault() */' in pm_txt, 'patch 2 did not persist'
+          print('KSU 4.19 compatibility patches applied and verified')
+          print('  patch1:', [l for l in kb_txt.splitlines() if '(inline )?int can_umount' in l][:1])
+          print('  patch2:', [l for l in pm_txt.splitlines() if '#if 0' in l][:1])
           PY
-          echo "--- verify patch 1 ---"
-          grep -n 'can_umount' kernel/drivers/kernelsu/Kbuild | head -n 3
-          echo "--- verify patch 2 ---"
-          grep -n -A3 'already has copy_to_kernel_nofault' kernel/drivers/kernelsu/hook/patch_memory.c
 
       - name: Build final kernel
         working-directory: kernel
@@ -310,6 +316,12 @@ jobs:
         run: |
           set -uo pipefail
           {
+            if [ ! -s build-final.log ]; then
+              echo "!! build-final.log is missing or EMPTY: the final kernel build did NOT run."
+              echo "!! The real failure is in a PRECEDING step (commonly 'Patch KSU-Next for 4.19 compatibility')."
+              echo "!! Open that step's log in the Actions UI instead of looking for compiler errors here."
+              echo
+            fi
             echo "=== compiler / make errors (last 60 hits, Broken pipe noise filtered) ==="
             grep -nEi 'error:|Error [0-9]+|\$\(error|FATAL|undefined reference|No rule to make target|not found|In file included' \
               build-final.log 2>/dev/null | grep -vi 'Broken pipe' | tail -n 60 || true
