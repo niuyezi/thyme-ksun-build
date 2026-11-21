@@ -67,6 +67,10 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
             python3 python-is-python3 zstd lz4 cpio file
+          # The kernel Makefile hardcodes "python2" for mkdtboimg.py.
+          printf '#!/bin/sh\nexec python3 "$@"\n' | sudo tee /usr/local/bin/python2 > /dev/null
+          sudo chmod +x /usr/local/bin/python2
+          python2 --version
 
       - name: Clone kernel source
         run: |
@@ -105,12 +109,24 @@ jobs:
           ld.lld --version | head -n 1
           aarch64-linux-gnu-gcc --version | head -n 1
 
+      - name: Get Python3 mkdtboimg
+        run: |
+          set -euo pipefail
+          mkdir -p tools
+          curl -fLSs \
+            "https://raw.githubusercontent.com/PixelOS-AOSP/android_system_libufdt/seventeen/utils/src/mkdtboimg.py" \
+            -o tools/mkdtboimg.py
+          python3 -m py_compile tools/mkdtboimg.py
+          head -n 1 tools/mkdtboimg.py
+          MKDTBO_EXT="$GITHUB_WORKSPACE/tools/mkdtboimg.py"
+          echo "MKDTBO_EXT=$MKDTBO_EXT" >> "$GITHUB_ENV"
+
       - name: Build unmodified baseline
         if: ${{ inputs.build_baseline }}
         working-directory: kernel
         run: |
           set -euo pipefail
-          MAKE_ARGS="O=../out/base ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          MAKE_ARGS="O=../out/base ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- MKDTBO_EXT=$MKDTBO_EXT"
           mkdir -p ../out/base
           if test -f ../input/device.config; then
             echo "Using exact config extracted from device /proc/config.gz"
@@ -159,7 +175,7 @@ jobs:
         working-directory: kernel
         run: |
           set -euo pipefail
-          MAKE_ARGS="O=../out/final ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          MAKE_ARGS="O=../out/final ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- MKDTBO_EXT=$MKDTBO_EXT"
           mkdir -p ../out/final
           if [ "$ENABLE_KSU" = "true" ] && test -f ../input/device-ksun.config; then
             echo "Using device config with KernelSU-Next options"
