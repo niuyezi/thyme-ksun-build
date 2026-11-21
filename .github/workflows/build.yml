@@ -194,6 +194,84 @@ jobs:
           git clean -fdx
           rm -rf drivers/kernelsu
 
+      # The Flicker "seventeen" tree ships the ORIGINAL KernelSU manual hooks
+      # as committed source (e.g. drivers/tty/pty.c calls ksu_handle_devpts()
+      # under #ifdef CONFIG_KSU). `git reset --hard` cannot undo committed
+      # code. Step 9 deletes drivers/kernelsu/ (the implementation), so every
+      # such inline call becomes an undefined symbol at link time once KSU-Next
+      # is integrated (run #6: ld.lld: undefined symbol: ksu_handle_devpts).
+      # KSU-Next uses syscall-table/LSM hooks and needs none of these. Strip
+      # all pure hook blocks generically instead of hardcoding one symbol.
+      - name: Remove legacy KernelSU inline hooks
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+
+          root = Path('kernel')
+          skip_dirs = {'kernelsu', 'KernelSU-Next', 'out', '.git'}
+
+          # Matches a complete "#ifdef CONFIG_KSU ... #endif" (also
+          # "#if defined(CONFIG_KSU)") block whose body is only hook lines.
+          block = re.compile(
+              r'(?m)^[ \t]*#(?:ifdef[ \t]+CONFIG_KSU'
+              r'|if[ \t]+defined\s*\(\s*CONFIG_KSU\s*\))[ \t]*\n'
+              r'((?:(?![ \t]*#(?:endif|else|elif|ifdef|ifndef)\b)[^\n]*\n)+?)'
+              r'[ \t]*#endif[^\n]*\n')
+
+          targets = []
+          for dirpath, dirnames, filenames in os.walk(root):
+              dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+              for fn in filenames:
+                  if fn.endswith(('.c', '.h')):
+                      targets.append(Path(dirpath) / fn)
+
+          def is_pure_hook_lines(body):
+              lines = [l.strip() for l in body.splitlines() if l.strip()]
+              if not lines:
+                  return False
+              return all('ksu_handle_' in l and l.endswith(';')
+                         and not l.startswith('//') for l in lines)
+
+          changed = []
+          for f in targets:
+              t = f.read_text(encoding='utf-8', errors='replace')
+              if 'ksu_handle_' not in t:
+                  continue
+              new = block.sub(lambda m: '' if is_pure_hook_lines(m.group(1))
+                              else m.group(0), t)
+              if new != t:
+                  f.write_text(new, encoding='utf-8')
+                  changed.append(f.relative_to(root).as_posix())
+
+          print('=== removed pure #ifdef CONFIG_KSU hook blocks from ===')
+          for r in changed:
+              print('  ', r)
+          if not changed:
+              print('   (none)')
+
+          # Audit: list any ksu_handle_* line still left in non-KSU sources.
+          remaining = []
+          for f in targets:
+              t = f.read_text(encoding='utf-8', errors='replace')
+              for i, l in enumerate(t.splitlines(), 1):
+                  if 'ksu_handle_' in l:
+                      remaining.append(f'{f.relative_to(root).as_posix()}:{i}: {l.strip()[:150]}')
+          print('=== remaining ksu_handle_* lines in kernel tree ===')
+          for r in remaining[:60]:
+              print('  ', r)
+          if not remaining:
+              print('   (none)')
+
+          pty = root / 'drivers' / 'tty' / 'pty.c'
+          assert pty.is_file(), 'drivers/tty/pty.c missing'
+          assert 'ksu_handle_devpts' not in pty.read_text(encoding='utf-8', errors='replace'), \
+              'legacy ksu_handle_devpts hook still present in pty.c'
+          print('OK: pty.c no longer references ksu_handle_devpts')
+          PY
+
       - name: Integrate KernelSU-Next
         if: ${{ inputs.enable_ksu }}
         run: |
