@@ -34,10 +34,10 @@ on:
         type: string
         default: "clang-r596125"
       build_baseline:
-        description: "Build unmodified baseline first (recommended)"
+        description: "Build unmodified baseline first (already verified; off by default to save ~18 min)"
         required: true
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -217,6 +217,65 @@ jobs:
           grep -n 'kernelsu' kernel/drivers/Makefile || true
           grep -n 'kernelsu' kernel/drivers/Kconfig || true
 
+      # KernelSU-Next legacy assumes kernels <5.8 lack copy_to_kernel_nofault()
+      # and that can_umount() is spelled "static int". This PixelOS 4.19 tree
+      # backported copy_to_kernel_nofault() and uses "static inline int
+      # can_umount", so the shipped Kbuild injects a duplicate definition and
+      # the <5.8 shim macro rewrites the uaccess.h prototype into garbage.
+      # Both were the real cause of run #4 "Build final kernel" exit 2.
+      - name: Patch KSU-Next for 4.19 compatibility
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          ksu = Path('kernel/drivers/kernelsu')
+          assert ksu.is_dir(), 'KSU driver dir missing'
+          real = ksu.resolve()
+          print('KSU source dir:', real)
+          kb = real / 'Kbuild'
+          pm = real / 'hook' / 'patch_memory.c'
+          assert kb.is_file(), 'Kbuild missing'
+          assert pm.is_file(), 'hook/patch_memory.c missing'
+
+          # Fix 1: KSU detects can_umount() with "^static int can_umount", but
+          # this 4.19 tree has "static inline int can_umount" -> Kbuild injects
+          # a duplicate definition into fs/namespace.c -> redefinition error.
+          t = kb.read_text(encoding='utf-8')
+          pat1 = re.compile(r'(grep\s+-Eq\s+["\'])\^static int can_umount(["\'])')
+          hits1 = pat1.findall(t)
+          if len(hits1) != 1:
+              print('!! can_umount guard not matched exactly once. Lines containing can_umount:')
+              for i, line in enumerate(t.splitlines(), 1):
+                  if 'can_umount' in line:
+                      print(f'  {i}: {line}')
+              raise SystemExit(f'expected 1 can_umount grep, found {len(hits1)}')
+          t = pat1.sub(lambda m: m.group(1) + '^static (inline )?int can_umount' + m.group(2), t)
+          kb.write_text(t, encoding='utf-8')
+
+          # Fix 2: this 4.19 kernel backported copy_to_kernel_nofault()
+          # (declared in uaccess.h, implemented in mm/maccess.c), but KSU's
+          # <5.8 shim re-#defines it to probe_kernel_write(), which rewrites
+          # the uaccess.h prototype into invalid C -> "type specifier missing".
+          p = pm.read_text(encoding='utf-8')
+          pat2 = re.compile(r'#if\s+LINUX_VERSION_CODE\s*<\s*KERNEL_VERSION\(5,\s*8,\s*0\)')
+          hits2 = pat2.findall(p)
+          if len(hits2) != 1:
+              print('!! 5.8 version guard not matched exactly once. Lines containing KERNEL_VERSION:')
+              for i, line in enumerate(p.splitlines(), 1):
+                  if 'KERNEL_VERSION' in line:
+                      print(f'  {i}: {line}')
+              raise SystemExit(f'expected 1 version guard, found {len(hits2)}')
+          p = pat2.sub('#if 0  /* 4.19 already provides copy_to_kernel_nofault() */', p)
+          pm.write_text(p, encoding='utf-8')
+          print('KSU 4.19 compatibility patches applied')
+          PY
+          echo "--- verify patch 1 ---"
+          grep -n 'can_umount' kernel/drivers/kernelsu/Kbuild | head -n 3
+          echo "--- verify patch 2 ---"
+          grep -n -A3 'already has copy_to_kernel_nofault' kernel/drivers/kernelsu/hook/patch_memory.c
+
       - name: Build final kernel
         working-directory: kernel
         run: |
@@ -251,9 +310,9 @@ jobs:
         run: |
           set -uo pipefail
           {
-            echo "=== compiler / make errors (last 60 hits) ==="
+            echo "=== compiler / make errors (last 60 hits, Broken pipe noise filtered) ==="
             grep -nEi 'error:|Error [0-9]+|\$\(error|FATAL|undefined reference|No rule to make target|not found|In file included' \
-              build-final.log 2>/dev/null | tail -n 60 || true
+              build-final.log 2>/dev/null | grep -vi 'Broken pipe' | tail -n 60 || true
             echo "=== last 80 lines of build-final.log ==="
             tail -n 80 build-final.log 2>/dev/null || true
             echo "=== resolved KSU config ==="
