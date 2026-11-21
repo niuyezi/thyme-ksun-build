@@ -1,0 +1,87 @@
+# thyme-ksun-build
+
+[中文](README.md) | English
+
+Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdragon 870) running **PixelOS / Android 17** — entirely in the cloud via GitHub Actions. No local Linux, cross-toolchain, or large RAM needed.
+
+## What it does
+
+- Pulls the exact kernel source commit matching the device (`fd144b4b...`, kernel `4.19.325-perf`)
+- Builds with the device's own `/proc/config.gz` config
+- Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
+- Outputs the kernel image, build log, and SHA-256 checksums
+
+## How to use
+
+1. Open the **Actions** tab of this repo.
+2. Select **thyme PixelOS KernelSU-Next kernel** on the left.
+3. Click **Run workflow** → **Run workflow**.
+4. Leave every parameter at its default — they are locked to this device's source commit and config.
+5. Wait ~15–30 min, then download the artifacts from the run page.
+
+### Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | Kernel source repo |
+| `kernel_ref` | `fd144b4b278e...` | Exact source commit (from device `uname`) |
+| `defconfig` | `thyme_defconfig` | Fallback defconfig (device config takes priority) |
+| `enable_ksu` | `true` | Replace stock KernelSU with KernelSU-Next |
+| `ksun_ref` | `legacy` | KernelSU-Next branch (required for 4.19 non-GKI) |
+| `clang_version` | `clang-r596125` | AOSP prebuilt clang version |
+| `build_baseline` | `false` | Also build an unmodified baseline first |
+
+### Outputs
+
+| Artifact | Contents |
+|---|---|
+| `thyme-pixelos-ksun` | `Image`, `Image.gz`, `*.dtb`, `dtbo.img`, `.config`, checksums, build log |
+| `thyme-build-logs` | Build log + diagnostics (also uploaded on failure) |
+
+## Referenced files and sources
+
+### Files in this repo
+
+| File | Role | Origin |
+|---|---|---|
+| `.github/workflows/build.yml` | Build workflow | This repo |
+| `input/device.config` | Kernel config used for the build | Exported from the device's `/proc/config.gz` (6378 lines) |
+| `input/device-ksun.config` | Config with KSU options layered on | Regenerated from `device.config` on every run |
+| `LICENSE` | Repo license | See "Open source & licensing" below |
+
+### Base system package
+
+- **Target ROM**: PixelOS (unofficial) for thyme / Mi 10S, Android 17, build `CP2A.260605.016` (2026-11-10)
+  - ROM author profile (XDA): https://xdaforums.com/m/alcatraz323.10682425/
+  - ROM downloads (SourceForge): https://sourceforge.net/projects/alcatrazdev-aosp/files/Mi%2010S/
+  - PixelOS site: https://pixelos.net ; source: https://github.com/PixelOS-AOSP
+- **Firmware base** (baseline required by the ROM): Xiaomi HyperOS `1.0.4.0` (thyme)
+
+### Upstream source and tools
+
+| Project | Use | Link | License |
+|---|---|---|---|
+| Flicker kernel tree | Kernel source, `seventeen` branch | https://github.com/Flicker-Android-Devices/kernel_xiaomi_sm8250 | GPL-2.0 |
+| KernelSU-Next | Built-in driver, `legacy` branch | https://github.com/KernelSU-Next/KernelSU-Next | GPL-3.0 |
+| PixelOS libufdt | Python3 `mkdtboimg.py` | https://github.com/PixelOS-AOSP/android_system_libufdt | Apache-2.0 |
+| AOSP Clang | `clang-r596125` cross toolchain | https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 | Apache-2.0 / LLVM exception |
+
+## Open source & licensing
+
+The workflow and scripts in this repo are licensed under [MIT](LICENSE). Referenced upstream source, binaries, and configs each follow their own licenses (see table above); the kernel and KernelSU-Next code in the build output remain under their respective GPL licenses. `input/device.config` is derived from the device kernel config and its rights belong to the respective kernel copyright holders.
+
+## Note
+
+The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack it with your original `boot.img` header (cmdline, pagesize, base, offsets, OS version/patch level) and ramdisk.
+
+This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
+
+## Credits
+
+- **Alcatraz323** — author of the PixelOS ROM used on this device (thyme maintainer)
+- **Flicker372** — maintainer of the `kernel_xiaomi_sm8250` kernel tree and ROM contributor
+- **johnmart19** and everyone who worked on the sm8250 platform — kernel support
+- **LineageOS** official maintainers for sm8250 — device and kernel baseline
+- **PixelOS team** — ROM foundation
+- **KernelSU / KernelSU-Next team and community** (tiann and contributors) — root solution
+- **AOSP / Google** — Android source, Clang toolchain, and `libufdt`
