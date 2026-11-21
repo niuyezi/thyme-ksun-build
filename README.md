@@ -8,7 +8,7 @@
 
 - 拉取与设备精确匹配的内核源码提交（`fd144b4b...`，内核 `4.19.325-perf`）
 - 使用设备自身 `/proc/config.gz` 导出的配置编译
-- 将原版 KernelSU 替换为 KernelSU-Next（`legacy` 分支，内置驱动 —— 这是非 GKI 的 4.19 内核）
+- 将原版 KernelSU 替换为 KernelSU-Next（默认 `v3.4.2`，与最新版管理器配套的驱动源码）
 - 产出内核镜像、编译日志和 SHA-256 校验清单
 
 ## 怎么用
@@ -27,7 +27,7 @@
 | `kernel_ref` | `fd144b4b278e...` | 精确源码提交（来自设备 `uname`） |
 | `defconfig` | `thyme_defconfig` | 备用 defconfig（设备配置优先） |
 | `enable_ksu` | `true` | 是否将原版 KernelSU 替换为 KSU-Next |
-| `ksun_ref` | `legacy` | KernelSU-Next 分支（4.19 非 GKI 必须用此分支） |
+| `ksun_ref` | `v3.4.2` | KernelSU-Next 驱动版本（与管理器版本保持配套） |
 | `clang_version` | `clang-r596125` | AOSP 预编译 clang 版本 |
 | `build_baseline` | `false` | 是否同时先编译未修改的基线 |
 
@@ -62,7 +62,7 @@
 | 项目 | 用途 | 链接 | 许可 |
 |---|---|---|---|
 | Flicker 内核树 | `seventeen` 分支内核源码 | https://github.com/Flicker-Android-Devices/kernel_xiaomi_sm8250 | GPL-2.0 |
-| KernelSU-Next | `legacy` 分支内置驱动 | https://github.com/KernelSU-Next/KernelSU-Next | GPL-3.0 |
+| KernelSU-Next | `v3.4.2` 驱动源码 | https://github.com/KernelSU-Next/KernelSU-Next | GPL-3.0 |
 | PixelOS libufdt | Python3 版 `mkdtboimg.py` | https://github.com/PixelOS-AOSP/android_system_libufdt | Apache-2.0 |
 | AOSP Clang | `clang-r596125` 交叉工具链 | https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 | Apache-2.0 / LLVM 例外 |
 
@@ -72,7 +72,7 @@
 
 ## 注意
 
-产物是**裸内核镜像**（`Image` / `dtbo.img`），**不是可直接刷入的 `boot.img`**。要启动或刷入，需用原 `boot.img` 的头信息（cmdline、pagesize、base、各偏移、OS 版本/补丁级别）和 ramdisk 重新打包。
+产物是**裸内核镜像**（`Image` / `dtbo.img`），**不是可直接刷入的 `boot.img`**。要启动或刷入，需以原 `boot.img` 为基础重新打包：保留头信息、ramdisk 等，替换其中的 kernel。
 
 本 workflow 只负责编译，不会接触你的设备。解锁、临时启动、刷入都需要你单独明确授权。
 

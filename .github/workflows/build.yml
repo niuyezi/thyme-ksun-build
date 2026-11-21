@@ -285,7 +285,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fLSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/v3.4.2/kernel/setup.sh" \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/$KSU_REF/kernel/setup.sh" \
             -o ksu_setup.sh
           echo "setup.sh sha256:"
           sha256sum ksu_setup.sh
@@ -307,7 +307,7 @@ jobs:
       # or the Kbuild can_umount() injection. It uses KPROBES and the in-tree
       # syscall hook sources. Keep this step as a compatibility audit instead
       # of patching legacy-only code that is not present in v3.4.2.
-      - name: Audit KSU-Next v3.4.2 integration
+      - name: Audit KSU-Next driver integration
         if: ${{ inputs.enable_ksu }}
         run: |
           set -euo pipefail
@@ -358,7 +358,7 @@ jobs:
           {
             if [ ! -s build-final.log ]; then
               echo "!! build-final.log is missing or EMPTY: the final kernel build did NOT run."
-              echo "!! The real failure is in a PRECEDING step (commonly 'Audit KSU-Next v3.4.2 integration' or config preparation)."
+              echo "!! The real failure is in a PRECEDING step (commonly 'Audit KSU-Next driver integration' or config preparation)."
               echo "!! Open that step's log in the Actions UI instead of looking for compiler errors here."
               echo
             fi
