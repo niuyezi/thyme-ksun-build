@@ -42,11 +42,17 @@ on:
 permissions:
   contents: read
 
+# All JS actions below are pinned to node24 builds (checkout v7 / upload-artifact v7).
+# This is a belt-and-braces switch so no action can silently fall back to node20.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
       KERNEL_REPO: ${{ inputs.kernel_repo }}
       KERNEL_REF: ${{ inputs.kernel_ref }}
       DEFCONFIG: ${{ inputs.defconfig }}
@@ -55,7 +61,7 @@ jobs:
       CLANG_VERSION: ${{ inputs.clang_version }}
     steps:
       - name: Checkout this workflow repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
 
       - name: Install build dependencies
         run: |
@@ -67,7 +73,7 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
             python3 python-is-python3 zstd lz4 cpio file
-          # The kernel Makefile hardcodes "python2" for mkdtboimg.py.
+          # The 4.19 kernel Makefile hardcodes "python2" for mkdtboimg.py.
           printf '#!/bin/sh\nexec python3 "$@"\n' | sudo tee /usr/local/bin/python2 > /dev/null
           sudo chmod +x /usr/local/bin/python2
           python2 --version
@@ -121,6 +127,44 @@ jobs:
           MKDTBO_EXT="$GITHUB_WORKSPACE/tools/mkdtboimg.py"
           echo "MKDTBO_EXT=$MKDTBO_EXT" >> "$GITHUB_ENV"
 
+      # Rebuild the KSU config from the device's own /proc/config.gz every run, so
+      # a stale or hand-edited input/device-ksun.config can never break the build.
+      - name: Prepare KernelSU-Next config
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          src = Path('input/device.config').read_text(encoding='utf-8', errors='replace').splitlines()
+          def is_ksu(l):
+              s = l.strip()
+              if s.startswith('# ') and ' is not set' in s:
+                  return s.split()[1].startswith('CONFIG_KSU')
+              if '=' in s and not s.startswith('#'):
+                  return s.split('=', 1)[0].startswith('CONFIG_KSU')
+              return False
+          out = [l for l in src if not is_ksu(l)]
+          # 4.19 is non-GKI: use syscall-table hook, NOT the kprobes hook
+          # (Kconfig says kprobes hook must not be used below 5.10). Strip any
+          # stale forced kprobes lines left by earlier config generations.
+          forced = {'CONFIG_KPROBES=y', 'CONFIG_KPROBE_EVENTS=y', 'CONFIG_KRETPROBES=y'}
+          out = [l for l in out if l.strip() not in forced]
+          out += [
+              'CONFIG_KSU=y',
+              '# CONFIG_KSU_MANUAL_HOOK is not set',
+              '# CONFIG_KSU_KPROBES_HOOK is not set',
+              'CONFIG_KSU_SYSCALL_TABLE_HOOK=y',
+          ]
+          Path('input/device-ksun.config').write_text('\n'.join(out) + '\n', encoding='utf-8')
+          print('wrote input/device-ksun.config:', len(out), 'lines')
+          PY
+          echo "--- KSU config tail ---"
+          tail -n 8 input/device-ksun.config
+          echo "--- must be empty: forced KPROBES ---"
+          grep -n '^CONFIG_KPROBES=y' input/device-ksun.config || echo "OK: no forced KPROBES"
+          echo "--- must be empty: duplicate CONFIG_KSU ---"
+          test "$(grep -c '^CONFIG_KSU=y' input/device-ksun.config)" = "1" && echo "OK: single CONFIG_KSU=y"
+
       - name: Build unmodified baseline
         if: ${{ inputs.build_baseline }}
         working-directory: kernel
@@ -167,9 +211,11 @@ jobs:
           grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
             sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' kernel/drivers/Kconfig
 
-          echo "--- KSU driver source ---"
+          echo "--- KSU driver wiring ---"
           ls -ld kernel/drivers/kernelsu
           head -n 5 kernel/drivers/kernelsu/Makefile
+          grep -n 'kernelsu' kernel/drivers/Makefile || true
+          grep -n 'kernelsu' kernel/drivers/Kconfig || true
 
       - name: Build final kernel
         working-directory: kernel
@@ -188,17 +234,54 @@ jobs:
           else
             make $MAKE_ARGS "$DEFCONFIG"
           fi
+          echo "--- resolved KSU / hook config (must show a hook =y) ---"
+          grep -E '^#? ?CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES) ' ../out/final/.config || true
+          cp ../out/final/.config ../final-defconfig.config
           make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee ../build-final.log
           test -f ../out/final/arch/arm64/boot/Image
-          echo "--- KSU config check ---"
-          grep -E '^CONFIG_(KSU|KPROBES|OVERLAY_FS)=' ../out/final/.config || true
           echo "--- artifact hashes ---"
           find ../out/final/arch/arm64/boot -maxdepth 3 -type f \
             \( -name 'Image' -o -name 'Image.gz' -o -name '*.dtb' -o -name 'dtbo.img' \) \
             -exec sha256sum {} + | tee ../artifacts.sha256
 
+      # Always run: on failure this is the only way to get the compiler error
+      # without manually downloading the log archive from the Actions UI.
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          set -uo pipefail
+          {
+            echo "=== compiler / make errors (last 60 hits) ==="
+            grep -nEi 'error:|Error [0-9]+|\$\(error|FATAL|undefined reference|No rule to make target|not found|In file included' \
+              build-final.log 2>/dev/null | tail -n 60 || true
+            echo "=== last 80 lines of build-final.log ==="
+            tail -n 80 build-final.log 2>/dev/null || true
+            echo "=== resolved KSU config ==="
+            grep -E '^#? ?CONFIG_(KSU|KPROBES|KRETPROBES)' final-defconfig.config 2>/dev/null || true
+          } > diagnostics.txt
+          echo "--- diagnostics preview ---"
+          head -n 40 diagnostics.txt
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: thyme-build-logs
+          path: |
+            build-final.log
+            build-baseline.log
+            diagnostics.txt
+            final-defconfig.config
+            input/device-ksun.config
+            ksu_setup.sh
+          if-no-files-found: ignore
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 14
+
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: thyme-pixelos-ksun
           path: |
@@ -206,7 +289,7 @@ jobs:
             out/final/arch/arm64/boot/Image.gz
             out/final/arch/arm64/boot/dts/**/*.dtb
             out/final/arch/arm64/boot/dtbo.img
-            out/final/.config
+            final-defconfig.config
             build-final.log
             build-baseline.log
             baseline.sha256
@@ -215,4 +298,6 @@ jobs:
             input/device.config
             input/device-ksun.config
           if-no-files-found: ignore
+          include-hidden-files: true
+          overwrite: true
           retention-days: 14
