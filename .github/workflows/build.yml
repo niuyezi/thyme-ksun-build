@@ -1,0 +1,195 @@
+name: thyme PixelOS KernelSU-Next kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "Kernel source repository"
+        required: true
+        type: string
+        default: "https://github.com/Flicker-Android-Devices/kernel_xiaomi_sm8250"
+      kernel_ref:
+        description: "Kernel branch/tag/commit SHA (default = exact commit from device uname)"
+        required: true
+        type: string
+        default: "fd144b4b278e61e0389cc72e07247bc919eb1be3"
+      defconfig:
+        description: "Defconfig name under arch/arm64/configs/"
+        required: true
+        type: string
+        default: "thyme_defconfig"
+      enable_ksu:
+        description: "Replace built-in KernelSU with KernelSU-Next"
+        required: true
+        type: boolean
+        default: true
+      ksun_ref:
+        description: "KernelSU-Next branch/tag/commit"
+        required: true
+        type: string
+        default: "legacy"
+      clang_version:
+        description: "AOSP prebuilt clang directory name"
+        required: true
+        type: string
+        default: "clang-r596125"
+      build_baseline:
+        description: "Build unmodified baseline first (recommended)"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      KERNEL_REPO: ${{ inputs.kernel_repo }}
+      KERNEL_REF: ${{ inputs.kernel_ref }}
+      DEFCONFIG: ${{ inputs.defconfig }}
+      KSU_REF: ${{ inputs.ksun_ref }}
+      ENABLE_KSU: ${{ inputs.enable_ksu }}
+      CLANG_VERSION: ${{ inputs.clang_version }}
+    steps:
+      - name: Checkout this workflow repo
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex build-essential curl git ca-certificates zip unzip \
+            libssl-dev libelf-dev libncurses-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+            python3 python-is-python3 zstd lz4 cpio file
+
+      - name: Clone kernel source
+        run: |
+          set -euo pipefail
+          mkdir -p kernel
+          git -C kernel init -q
+          git -C kernel remote add origin "$KERNEL_REPO"
+          git -C kernel fetch --depth 1 origin "$KERNEL_REF"
+          git -C kernel checkout -q FETCH_HEAD
+          echo "kernel HEAD: $(git -C kernel rev-parse HEAD)"
+          echo "kernel version: $(make -C kernel kernelversion)"
+          test -f "kernel/arch/arm64/configs/$DEFCONFIG" || {
+            echo "Defconfig not found: kernel/arch/arm64/configs/$DEFCONFIG" >&2
+            exit 1
+          }
+          grep -E '^CONFIG_(LOCALVERSION|IKCONFIG|KSU)=' \
+            "kernel/arch/arm64/configs/$DEFCONFIG" || true
+
+      - name: Get AOSP clang toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p toolchains
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            toolchains/clang-aosp
+          git -C toolchains/clang-aosp sparse-checkout set "$CLANG_VERSION"
+          echo "$GITHUB_WORKSPACE/toolchains/clang-aosp/$CLANG_VERSION/bin" >> "$GITHUB_PATH"
+          clang --version | head -n 2
+          ld.lld --version | head -n 1
+          aarch64-linux-gnu-gcc --version | head -n 1
+
+      - name: Build unmodified baseline
+        if: ${{ inputs.build_baseline }}
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          MAKE_ARGS="O=../out/base ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          mkdir -p ../out/base
+          if test -f ../input/device.config; then
+            echo "Using exact config extracted from device /proc/config.gz"
+            cp ../input/device.config ../out/base/.config
+            make $MAKE_ARGS olddefconfig
+          else
+            make $MAKE_ARGS "$DEFCONFIG"
+          fi
+          make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee ../build-baseline.log
+          for f in Image Image.gz; do
+            test -f "../out/base/arch/arm64/boot/$f" && sha256sum "../out/base/arch/arm64/boot/$f" >> ../baseline.sha256
+          done
+          cat ../baseline.sha256
+
+      - name: Reset kernel tree before integration
+        if: ${{ inputs.enable_ksu }}
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fdx
+          rm -rf drivers/kernelsu
+
+      - name: Integrate KernelSU-Next
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" \
+            -o ksu_setup.sh
+          echo "setup.sh sha256:"
+          sha256sum ksu_setup.sh
+          (cd kernel && sh ../ksu_setup.sh "$KSU_REF")
+
+          test -f kernel/drivers/kernelsu/Makefile
+          grep -q 'obj-$(CONFIG_KSU)' kernel/drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> kernel/drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' kernel/drivers/Kconfig || \
+            sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' kernel/drivers/Kconfig
+
+          echo "--- KSU driver source ---"
+          ls -ld kernel/drivers/kernelsu
+          head -n 5 kernel/drivers/kernelsu/Makefile
+
+      - name: Build final kernel
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          MAKE_ARGS="O=../out/final ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          mkdir -p ../out/final
+          if [ "$ENABLE_KSU" = "true" ] && test -f ../input/device-ksun.config; then
+            echo "Using device config with KernelSU-Next options"
+            cp ../input/device-ksun.config ../out/final/.config
+            make $MAKE_ARGS olddefconfig
+          elif test -f ../input/device.config; then
+            echo "Using exact config extracted from device /proc/config.gz"
+            cp ../input/device.config ../out/final/.config
+            make $MAKE_ARGS olddefconfig
+          else
+            make $MAKE_ARGS "$DEFCONFIG"
+          fi
+          make -j"$(nproc)" $MAKE_ARGS 2>&1 | tee ../build-final.log
+          test -f ../out/final/arch/arm64/boot/Image
+          echo "--- KSU config check ---"
+          grep -E '^CONFIG_(KSU|KPROBES|OVERLAY_FS)=' ../out/final/.config || true
+          echo "--- artifact hashes ---"
+          find ../out/final/arch/arm64/boot -maxdepth 3 -type f \
+            \( -name 'Image' -o -name 'Image.gz' -o -name '*.dtb' -o -name 'dtbo.img' \) \
+            -exec sha256sum {} + | tee ../artifacts.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: thyme-pixelos-ksun
+          path: |
+            out/final/arch/arm64/boot/Image
+            out/final/arch/arm64/boot/Image.gz
+            out/final/arch/arm64/boot/dts/**/*.dtb
+            out/final/arch/arm64/boot/dtbo.img
+            out/final/.config
+            build-final.log
+            build-baseline.log
+            baseline.sha256
+            artifacts.sha256
+            ksu_setup.sh
+            input/device.config
+            input/device-ksun.config
+          if-no-files-found: ignore
+          retention-days: 14
