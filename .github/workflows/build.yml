@@ -452,6 +452,11 @@ jobs:
       # (newfstatat -> ksu_handle_stat() = su-path hiding, NOT a st_size bump).
       # So fd-based sys_newfstat needs this inline manual hook.
       #
+      # The kernel enforces C89 declarations (-Werror=declaration-after-statement),
+      # so the extern prototype is placed at FILE SCOPE and only the call is
+      # inserted into the function body (a declaration after cp_new_stat()
+      # fails the build even though the logic is correct).
+      #
       # Must run AFTER "Remove legacy KernelSU inline hooks" (which strips
       # #ifdef CONFIG_KSU blocks) and AFTER "Integrate KernelSU-Next" (which
       # creates the symbol). Android 17 init is 64-bit, so only the native
@@ -501,26 +506,44 @@ jobs:
                   break
           assert ret_idx is not None, 'return error; not found in newfstat'
 
-          hook = [
+          # Insert from the bottom up so the earlier index stays valid.
+          # Only a STATEMENT goes in the function body; the extern prototype
+          # lives at file scope above the syscall (C89 / -Werror).
+          call = [
               '\n',
               '#ifdef CONFIG_KSU\n',
-              '\textern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);\n',
               '\tksu_handle_newfstat_ret(&fd, &statbuf);\n',
               '#endif\n',
           ]
-          lines[ret_idx:ret_idx] = hook
+          lines[ret_idx:ret_idx] = call
+
+          decl = [
+              '#ifdef CONFIG_KSU\n',
+              'extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);\n',
+              '#endif\n',
+          ]
+          lines[start:start] = decl
           path.write_text(''.join(lines), encoding='utf-8')
 
           out = path.read_text(encoding='utf-8', errors='replace')
           assert out.count('ksu_handle_newfstat_ret') == 2, \
               'hook was not written exactly once'
+          assert 'extern void ksu_handle_newfstat_ret(' in out, \
+              'file-scope extern declaration missing'
           assert 'ksu_handle_newfstat_ret(&fd, &statbuf);' in out
+          i_decl = out.index('extern void ksu_handle_newfstat_ret(')
+          i_sys = out.index('SYSCALL_DEFINE2(newfstat')
           i_hook = out.index('ksu_handle_newfstat_ret(&fd')
-          assert out.index('cp_new_stat(&stat, statbuf)') < i_hook, \
-              'hook must be after cp_new_stat()'
+          assert i_decl < i_sys, 'extern declaration must be at file scope'
+          i_cp = out.index('cp_new_stat(&stat, statbuf)', i_sys)
+          assert i_cp < i_hook, 'hook must be after cp_new_stat() in newfstat'
           assert i_hook < out.index('return error;', i_hook), \
               'hook must be before return error;'
-          print('OK: newfstat ret hook inserted (st_size bump for init.rc)')
+          # The cleanup step must have run first, otherwise a future reordering
+          # could strip our own #ifdef CONFIG_KSU block too.
+          assert 'ksu_handle_stat' not in out, \
+              'legacy ksu_handle_stat hooks still present - cleanup did not run first'
+          print('OK: newfstat ret hook inserted (file-scope extern + in-body call)')
           PY
           grep -n -B4 -A6 'ksu_handle_newfstat_ret' kernel/fs/stat.c || true
 
