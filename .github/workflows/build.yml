@@ -360,6 +360,78 @@ jobs:
           print('  patch2:', [l for l in pm_txt.splitlines() if '#if 0' in l][:1])
           PY
 
+      # UAPI 6 obtains the KernelSU driver fd through a reboot-magic supercall:
+      #   userspace/ksud/src/ksucalls.rs: init_driver_fd()
+      #     -> reboot(0xDEADBEEF, 0xCAFEBABE, 0, &fd)
+      # KSUN legacy registers that reboot kprobe ONLY under KSU_KPROBES_HOOK
+      # (kernel/supercall/supercall.c: register_kprobe(&reboot_kp)), but kprobes
+      # cannot be used on 4.19 (Kconfig: "should not be used below 5.10", and
+      # issue #1053 reports bootloops). The syscall-table scheme patches just
+      # execve/execveat/faccessat/newfstatat, so without an inline reboot hook
+      # the manager never gets a driver fd:
+      #   "ksuctl failed: could not retrieve kernelsu driver fd"
+      #   -> "Failed to grant root" / "/data/adb/ is not a regular directory"
+      # Maintainer rifsxd on issue #1053: "You are missing a critical manual
+      # hooks, go implement reboot hook and test again".
+      #
+      # This step MUST run after "Remove legacy KernelSU inline hooks" (which
+      # strips #ifdef CONFIG_KSU hook blocks) and after "Integrate KernelSU-Next"
+      # (which creates the ksu_handle_sys_reboot symbol). The hook must sit
+      # BEFORE ns_capable()/magic checks because the manager is not root.
+      - name: Add reboot supercall hook for UAPI 6 driver fd
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('kernel/kernel/reboot.c')
+          assert path.is_file(), f'missing {path}'
+          text = path.read_text(encoding='utf-8', errors='replace')
+
+          if 'ksu_handle_sys_reboot' in text:
+              print('reboot hook already present, skipping')
+              raise SystemExit(0)
+
+          lines = text.splitlines(keepends=True)
+          starts = [i for i, l in enumerate(lines)
+                    if 'SYSCALL_DEFINE4(reboot' in l]
+          assert len(starts) == 1, f'expected 1 reboot syscall, found {len(starts)}'
+          start = starts[0]
+
+          # Insert right after "int ret = 0;" in the reboot syscall body.
+          anchor = None
+          for j in range(start, min(start + 40, len(lines))):
+              if 'int ret = 0;' in lines[j]:
+                  anchor = j
+                  break
+          assert anchor is not None, 'int ret = 0; not found in reboot syscall'
+
+          hook = [
+              '#ifdef CONFIG_KSU\n',
+              '\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n',
+              '\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n',
+              '#endif\n',
+              '\n',
+          ]
+          lines[anchor + 1:anchor + 1] = hook
+          path.write_text(''.join(lines), encoding='utf-8')
+
+          # Read-back verification: a shell grep under set -e is unreliable
+          # when the pattern drifts, so assert against the file we just wrote.
+          out = path.read_text(encoding='utf-8', errors='replace')
+          assert out.count('ksu_handle_sys_reboot') == 2, \
+              'hook was not written exactly once'
+          assert 'ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);' in out, \
+              'hook call missing'
+          i_hook = out.index('ksu_handle_sys_reboot(magic1')
+          i_cap = out.index('ns_capable', i_hook)
+          assert i_cap > i_hook, 'hook must precede the ns_capable() check'
+          assert out.index('#ifdef CONFIG_KSU') < i_hook
+          print('OK: reboot supercall hook inserted before capability checks')
+          PY
+          grep -n -B3 -A6 'ksu_handle_sys_reboot' kernel/kernel/reboot.c || true
+
       - name: Build final kernel
         working-directory: kernel
         run: |
