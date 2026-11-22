@@ -27,6 +27,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | Kernel source repo |
 | `kernel_ref` | `e7dc99d5350d...` | Exact source commit (from the ROM kernel version string `...-perf-g<sha>`) |
+| `boot_image_url` | empty | Optional. Direct link to a thyme `boot.img`; derives `kernel_ref` and `input/device.config` from it (overrides the two rows above) |
 | `defconfig` | `thyme_defconfig` | Fallback defconfig (device config takes priority) |
 | `enable_ksu` | `true` | Replace stock KernelSU with KernelSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next branch (required for 4.19 non-GKI) |
@@ -89,6 +90,13 @@ Modules depend on the kernel injecting an `on post-fs-data` block into init.rc a
 A ROM update always requires a rebuild: a new ROM changes both the kernel source commit and the defconfig, so an old `Image` no longer matches the new vendor modules’ `vermagic` / `CONFIG_MODVERSIONS` CRCs. Reusing it may still boot but silently loses kernel-module-dependent features. After an update, refresh `kernel_ref` and `input/device.config`, then run the build once.
 
 This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
+
+### After a ROM update
+
+A ROM update changes both the kernel source commit and the defconfig, so the kernel must be rebuilt once. Two options:
+
+- **Automatic (recommended)**: host the new `boot.img` somewhere directly downloadable (e.g. a Release asset of this repo) and pass its URL as `boot_image_url` when dispatching the workflow. The workflow reads the kernel commit (`Linux version ...-perf-g<sha>`) and the embedded `config.gz` straight from the image — no file edits needed.
+- **Manual**: change the `kernel_ref` default in `.github/workflows/build.yml` and replace `input/device.config`.
 
 ## Credits
 
