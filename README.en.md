@@ -7,7 +7,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 ## What it does
 
 - Pulls the exact kernel source commit matching the device (`e7dc99d5350d...`, kernel `4.19.325-perf`)
-- Builds with the device's own `/proc/config.gz` config
+- Uses the `config.gz` embedded in the ROM kernel image as the build config
 - Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
 - Adds a `reboot` supercall hook for 4.19 so a UAPI 6 manager can obtain the driver fd and grant root
 - Adds a `newfstat` return hook in `fs/stat.c` so init can see the injected `on post-fs-data` block, which is required for modules (overlay mounts, module scripts, metamodules)
@@ -26,7 +26,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 | Parameter | Default | Meaning |
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | Kernel source repo |
-| `kernel_ref` | `e7dc99d5350d...` | Exact source commit (from device `uname`) |
+| `kernel_ref` | `e7dc99d5350d...` | Exact source commit (from the ROM kernel version string `...-perf-g<sha>`) |
 | `defconfig` | `thyme_defconfig` | Fallback defconfig (device config takes priority) |
 | `enable_ksu` | `true` | Replace stock KernelSU with KernelSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next branch (required for 4.19 non-GKI) |
@@ -85,6 +85,8 @@ The workflow and scripts in this repo are licensed under [MIT](LICENSE). Referen
 The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack using your current system's original `boot.img`: replace the kernel region in place (start is normally pagesize `4096`, length is `kernel_size` from the boot header); if the new image is smaller than the original `kernel_size`, zero-fill the remainder; keep the boot header, ramdisk, and trailing AVB footer byte-for-byte identical, and keep the total file size unchanged.
 
 Modules depend on the kernel injecting an `on post-fs-data` block into init.rc and running `ksud post-fs-data`; this kernel includes the required patch. Root grant and modules are separate paths — working root does not imply working modules, and vice versa. If modules do not work, first verify the manager is UAPI 6 and built from the same source generation as the kernel.
+
+A ROM update always requires a rebuild: a new ROM changes both the kernel source commit and the defconfig, so an old `Image` no longer matches the new vendor modules’ `vermagic` / `CONFIG_MODVERSIONS` CRCs. Reusing it may still boot but silently loses kernel-module-dependent features. After an update, refresh `kernel_ref` and `input/device.config`, then run the build once.
 
 This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
 
