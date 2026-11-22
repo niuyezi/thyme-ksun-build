@@ -59,6 +59,7 @@
 | `input/device.config` | 编译时使用的内核配置 | 从设备内核内嵌 `config.gz` 提取（6329 行） |
 | `input/device-ksun.config` | 叠加 KSU 选项后的配置 | 每次运行由 `device.config` 自动生成 |
 | `LICENSE` | 本仓库授权 | 见下方「开源与许可」 |
+| `NOTICE.md` | 上游来源、commit、修改点与许可声明 | 本仓库 |
 
 ### 开发所依据的系统包
 
@@ -79,7 +80,15 @@
 
 ## 开源与许可
 
-本仓库自身的工作流与脚本以 [MIT](LICENSE) 授权。引用的上游源码、二进制与配置分别遵循其各自许可证（见上表）；编译产物中的内核与 KernelSU-Next 代码受对应 GPL 许可约束。`input/device.config` 源自设备内核配置，其权利归相应内核版权方所有。
+本项目非 KernelSU / KernelSU-Next 官方项目，未获上游授权或背书。
+
+本仓库自身的工作流与文档以 [MIT](LICENSE) 授权；该 MIT **不覆盖**任何上游代码或二进制。上游来源、准确 commit / 分支、许可证，以及本项目对内核的两处插桩修改（reboot supercall 与 newfstat 模块链），统一记录在 [NOTICE.md](NOTICE.md)，发布产物前请先读该文件。
+
+引用的上游源码、二进制与配置分别遵循其各自许可证（见上表）；编译产物中的内核与 KernelSU-Next 代码受对应 GPL 许可约束。`input/device.config` 源自设备内核配置，其权利归相应内核版权方所有。
+
+对外发布含 GPL 内核的产物时，必须同时提供可重建的内核源码仓库 + 准确 commit + 本仓库的全部补丁步骤，并保留上游许可证文本；仅发布 `boot.img` / `Image` 不满足 GPL 义务。
+
+如权利人认为存在权利冲突，请在本仓库提 issue，我会立即下架相关内容。本说明基于许可证文本与开源惯例，不构成法律意见。
 
 ## 注意
 
