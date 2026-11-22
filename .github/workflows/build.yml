@@ -432,6 +432,98 @@ jobs:
           PY
           grep -n -B3 -A6 'ksu_handle_sys_reboot' kernel/kernel/reboot.c || true
 
+      # KernelSU-Next bootstraps its module system by injecting KERNEL_SU_RC
+      # ("on post-fs-data -> ksud post-fs-data") into init.rc. It does so by
+      # replacing the init.rc file's f_op with read_proxy()/read_iter_proxy(),
+      # which append the rc text only AFTER the original read returns 0 (EOF).
+      #
+      # Android init sizes its read buffer from the st_size returned by
+      # fstat()/newfstat(). With the real file size it consumes exactly that
+      # many bytes and stops -- it never issues the extra read that would
+      # return 0, so the proxy never appends anything:
+      #   -> no "on post-fs-data" section, ksud post-fs-data never runs,
+      #   -> no module overlay mounts, every module appears installed but dead.
+      #
+      # KSUN legacy fixes this in ksu_common_newfstat_ret(), reached through
+      # ksu_handle_newfstat_ret(), which adds ksu_rc_len + module_rc_len to
+      # st_size so init reads past the original EOF. In kprobes builds that is
+      # a kretprobe on sys_newfstat; on 4.19 we use CONFIG_KSU_SYSCALL_TABLE_HOOK
+      # and the syscall table only carries execve/execveat/faccessat/newfstatat
+      # (newfstatat -> ksu_handle_stat() = su-path hiding, NOT a st_size bump).
+      # So fd-based sys_newfstat needs this inline manual hook.
+      #
+      # Must run AFTER "Remove legacy KernelSU inline hooks" (which strips
+      # #ifdef CONFIG_KSU blocks) and AFTER "Integrate KernelSU-Next" (which
+      # creates the symbol). Android 17 init is 64-bit, so only the native
+      # newfstat is hooked: COMPAT_SYSCALL_DEFINE2(newfstat) and fstat64 are
+      # deliberately untouched (fstat64's handler is conditionally compiled
+      # and would be an undefined symbol on arm64).
+      - name: Add newfstat ret hook for module system (post-fs-data)
+        if: ${{ inputs.enable_ksu }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          # Fail early (not at link time) if the KSUN tree drifted.
+          ksu_src = Path('kernel/drivers/kernelsu/runtime/ksud_integration.c')
+          assert ksu_src.is_file(), f'missing {ksu_src}'
+          assert 'void ksu_handle_newfstat_ret(' in \
+              ksu_src.read_text(encoding='utf-8', errors='replace'), \
+              'KSUN no longer exports ksu_handle_newfstat_ret()'
+
+          path = Path('kernel/fs/stat.c')
+          assert path.is_file(), f'missing {path}'
+          text = path.read_text(encoding='utf-8', errors='replace')
+
+          if 'ksu_handle_newfstat_ret' in text:
+              print('newfstat ret hook already present, skipping')
+              raise SystemExit(0)
+
+          lines = text.splitlines(keepends=True)
+          # Anchored at line start: COMPAT_SYSCALL_DEFINE2(newfstat, ...)
+          # contains the same substring and must NOT be matched.
+          starts = [i for i, l in enumerate(lines)
+                    if re.match(r'^[ \t]*SYSCALL_DEFINE2\(newfstat\b', l)]
+          assert len(starts) == 1, \
+              f'expected 1 native SYSCALL_DEFINE2(newfstat), found {len(starts)}'
+          start = starts[0]
+
+          # Insert between cp_new_stat() and "return error;" so statbuf is
+          # already populated when KSUN patches st_size.
+          ret_idx = None
+          for j in range(start, min(start + 25, len(lines))):
+              if j > start and 'SYSCALL_DEFINE' in lines[j]:
+                  break
+              if lines[j].strip() == 'return error;':
+                  ret_idx = j
+                  break
+          assert ret_idx is not None, 'return error; not found in newfstat'
+
+          hook = [
+              '\n',
+              '#ifdef CONFIG_KSU\n',
+              '\textern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);\n',
+              '\tksu_handle_newfstat_ret(&fd, &statbuf);\n',
+              '#endif\n',
+          ]
+          lines[ret_idx:ret_idx] = hook
+          path.write_text(''.join(lines), encoding='utf-8')
+
+          out = path.read_text(encoding='utf-8', errors='replace')
+          assert out.count('ksu_handle_newfstat_ret') == 2, \
+              'hook was not written exactly once'
+          assert 'ksu_handle_newfstat_ret(&fd, &statbuf);' in out
+          i_hook = out.index('ksu_handle_newfstat_ret(&fd')
+          assert out.index('cp_new_stat(&stat, statbuf)') < i_hook, \
+              'hook must be after cp_new_stat()'
+          assert i_hook < out.index('return error;', i_hook), \
+              'hook must be before return error;'
+          print('OK: newfstat ret hook inserted (st_size bump for init.rc)')
+          PY
+          grep -n -B4 -A6 'ksu_handle_newfstat_ret' kernel/fs/stat.c || true
+
       - name: Build final kernel
         working-directory: kernel
         run: |
