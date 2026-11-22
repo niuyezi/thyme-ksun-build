@@ -9,7 +9,7 @@ on:
         type: string
         default: "https://github.com/Flicker-Android-Devices/kernel_xiaomi_sm8250"
       kernel_ref:
-        description: "Kernel branch/tag/commit SHA (default = exact commit from device uname)"
+        description: "Kernel branch/tag/commit SHA (default = commit this project was built against; ignored when boot_image_url is set)"
         required: true
         type: string
         default: "e7dc99d5350d3f443946af44b196c9fa6f2cb02a"
@@ -38,6 +38,11 @@ on:
         required: true
         type: boolean
         default: false
+      boot_image_url:
+        description: "Optional: URL of a thyme boot.img. Derives kernel_ref and input/device.config from it (overrides the two values above). Leave empty to use the repo defaults."
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -77,6 +82,133 @@ jobs:
           printf '#!/bin/sh\nexec python3 "$@"\n' | sudo tee /usr/local/bin/python2 > /dev/null
           sudo chmod +x /usr/local/bin/python2
           python2 --version
+
+      # Optional path: derive both "which kernel source" and "which config" from a
+      # ROM boot.img, so a ROM update needs no source edit at all.
+      #
+      # A ROM update changes the kernel source commit AND the defconfig. Both were
+      # hardcoded before, which means every ROM bump required a manual commit or the
+      # build silently produced a kernel whose vermagic / CONFIG_MODVERSIONS CRCs no
+      # longer match the ROM's vendor kernel modules. Everything needed is already
+      # inside the boot image:
+      #   - commit <- "Linux version 4.19.325-perf-g<sha>" banner in the Image
+      #   - config <- the config.gz embedded by CONFIG_IKCONFIG
+      # The derived commit is exported through $GITHUB_ENV, which overrides the
+      # job-level KERNEL_REF for all later steps; the derived config overwrites
+      # input/device.config in the workspace (and is uploaded with the artifact).
+      #
+      # Empty boot_image_url => step skipped => repo defaults, i.e. the previous
+      # behaviour is fully preserved.
+      - name: Derive kernel ref and config from boot image
+        if: ${{ inputs.boot_image_url != '' }}
+        env:
+          BOOT_URL: ${{ inputs.boot_image_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fLSs --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/boot.img" "$BOOT_URL"
+          ls -l "$RUNNER_TEMP/boot.img"
+          python3 - <<'PY'
+          import os, re, struct, zlib
+          from pathlib import Path
+
+          data = (Path(os.environ['RUNNER_TEMP']) / 'boot.img').read_bytes()
+          assert data[:8] == b'ANDROID!', 'not an Android boot image'
+          header_version = struct.unpack_from('<I', data, 40)[0]
+          kernel_size = struct.unpack_from('<I', data, 8)[0]
+
+          # v3/v4 always start the kernel at one 4096 page; older headers carry
+          # the real page size at offset 36.
+          if header_version >= 3:
+              koff = 4096
+          else:
+              page_size = struct.unpack_from('<I', data, 36)[0]
+              assert page_size in (2048, 4096, 8192, 16384), f'bad page_size {page_size}'
+              koff = page_size
+
+          kernel = data[koff:koff + kernel_size]
+          assert len(kernel) == kernel_size, 'truncated kernel region'
+          print(f'header v{header_version}: kernel {kernel_size:,d} B at {koff}')
+
+          # --- 1. kernel source commit from the version banner ---
+          m = re.search(rb'Linux version \d+\.\d+\.\d+[^\x00\n]{0,160}', kernel)
+          assert m, 'no "Linux version" banner found in the Image'
+          banner = m.group(0).decode('ascii', 'replace')
+          print('banner:', banner[:160])
+          cm = re.search(r'-g([0-9a-f]{7,40})', banner)
+          assert cm, 'banner has no -g<sha> localversion; set kernel_ref manually'
+          ref = cm.group(1)
+          print('derived short sha:', ref)
+
+          # `git fetch origin <sha>` needs a full 40-char object name; the version
+          # banner only carries 12 hex chars, so expand it through the GitHub API
+          # (abbreviated SHAs are accepted there).
+          if len(ref) < 40:
+              import json, urllib.error, urllib.request
+              mm = re.search(r'github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$',
+                             os.environ.get('KERNEL_REPO', ''))
+              assert mm, 'cannot parse kernel_repo; pass kernel_ref manually'
+              api = (f'https://api.github.com/repos/{mm.group(1)}/{mm.group(2)}'
+                     f'/commits/{ref}')
+              token = os.environ.get('GITHUB_TOKEN')
+
+              def _resolve(with_token):
+                  rq = urllib.request.Request(api, headers={
+                      'Accept': 'application/vnd.github+json',
+                      'User-Agent': 'thyme-ksun-build'})
+                  if with_token and token:
+                      rq.add_header('Authorization', f'Bearer {token}')
+                  with urllib.request.urlopen(rq, timeout=30) as r:
+                      return json.loads(r.read())['sha']
+
+              # The Actions token is scoped to THIS repo; a read against another
+              # public repo may come back 401/403. Anonymous reads (60/h) suffice.
+              try:
+                  ref = _resolve(True)
+              except urllib.error.HTTPError as e:
+                  if e.code not in (401, 403):
+                      raise
+                  print(f'API rejected the token ({e.code}), retrying anonymously')
+                  ref = _resolve(False)
+              print('expanded kernel_ref:', ref)
+          assert re.fullmatch(r'[0-9a-f]{40}', ref), f'not a full commit sha: {ref}'
+
+          # --- 2. config from the embedded config.gz ---
+          cfg = None
+          pos = 0
+          while True:
+              i = kernel.find(b'\x1f\x8b\x08', pos)
+              if i < 0:
+                  break
+              pos = i + 1
+              try:
+                  out = zlib.decompressobj(wbits=31).decompress(kernel[i:i + 8 * 1024 * 1024])
+              except Exception:
+                  continue
+              if b'CONFIG_' in out[:4000] and b'\nCONFIG_' in out:
+                  cfg = out.decode('utf-8', 'replace')
+                  break
+          assert cfg, 'no embedded config.gz (CONFIG_IKCONFIG not set?)'
+
+          lines = cfg.replace('\r\n', '\n').splitlines()
+          print(f'derived config: {len(lines)} lines')
+          assert len(lines) > 1000, 'extracted config looks truncated'
+          # KernelSU-Next module support needs overlayfs in the kernel.
+          assert 'CONFIG_OVERLAY_FS=y' in cfg, 'config lacks CONFIG_OVERLAY_FS=y'
+
+          Path('input/device.config').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write(f'KERNEL_REF={ref}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+              f.write('### Derived from boot image\n\n')
+              f.write('| field | value |\n|---|---|\n')
+              f.write(f'| header version | v{header_version} |\n')
+              f.write(f'| kernel_ref | `{ref}` |\n')
+              f.write(f'| config lines | {len(lines)} |\n')
+              f.write(f'| source | `{os.environ["BOOT_URL"]}` |\n')
+          print('wrote input/device.config; KERNEL_REF exported for later steps')
+          PY
 
       - name: Clone kernel source
         run: |
@@ -127,8 +259,10 @@ jobs:
           MKDTBO_EXT="$GITHUB_WORKSPACE/tools/mkdtboimg.py"
           echo "MKDTBO_EXT=$MKDTBO_EXT" >> "$GITHUB_ENV"
 
-      # Rebuild the KSU config from the device's own /proc/config.gz every run, so
-      # a stale or hand-edited input/device-ksun.config can never break the build.
+      # Rebuild the KSU config from input/device.config every run, so a stale or
+      # hand-edited input/device-ksun.config can never break the build.
+      # input/device.config itself comes from the ROM kernel's embedded config.gz
+      # (auto-derived when boot_image_url is set, otherwise the committed copy).
       - name: Prepare KernelSU-Next config
         if: ${{ inputs.enable_ksu }}
         run: |
@@ -173,7 +307,7 @@ jobs:
           MAKE_ARGS="O=../out/base ARCH=arm64 LLVM=1 CC=clang LD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- MKDTBO_EXT=$MKDTBO_EXT"
           mkdir -p ../out/base
           if test -f ../input/device.config; then
-            echo "Using exact config extracted from device /proc/config.gz"
+            echo "Using exact kernel config from input/device.config (ROM boot.img embedded config.gz)"
             cp ../input/device.config ../out/base/.config
             make $MAKE_ARGS olddefconfig
           else
@@ -558,7 +692,7 @@ jobs:
             cp ../input/device-ksun.config ../out/final/.config
             make $MAKE_ARGS olddefconfig
           elif test -f ../input/device.config; then
-            echo "Using exact config extracted from device /proc/config.gz"
+            echo "Using exact kernel config from input/device.config (ROM boot.img embedded config.gz)"
             cp ../input/device.config ../out/final/.config
             make $MAKE_ARGS olddefconfig
           else
