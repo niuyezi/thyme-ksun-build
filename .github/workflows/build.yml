@@ -12,7 +12,7 @@ on:
         description: "Kernel branch/tag/commit SHA (default = exact commit from device uname)"
         required: true
         type: string
-        default: "fd144b4b278e61e0389cc72e07247bc919eb1be3"
+        default: "e7dc99d5350d3f443946af44b196c9fa6f2cb02a"
       defconfig:
         description: "Defconfig name under arch/arm64/configs/"
         required: true
