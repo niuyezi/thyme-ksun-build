@@ -10,6 +10,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 - Builds with the device's own `/proc/config.gz` config
 - Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
 - Adds a `reboot` supercall hook for 4.19 so a UAPI 6 manager can obtain the driver fd and grant root
+- Adds a `newfstat` return hook in `fs/stat.c` so init can see the injected `on post-fs-data` block, which is required for modules (overlay mounts, module scripts, metamodules)
 - Outputs the kernel image, build log, and SHA-256 checksums
 
 ## How to use
@@ -82,6 +83,8 @@ The workflow and scripts in this repo are licensed under [MIT](LICENSE). Referen
 ## Note
 
 The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack using your current system's original `boot.img`: replace the kernel region in place (start is normally pagesize `4096`, length is `kernel_size` from the boot header); if the new image is smaller than the original `kernel_size`, zero-fill the remainder; keep the boot header, ramdisk, and trailing AVB footer byte-for-byte identical, and keep the total file size unchanged.
+
+Modules depend on the kernel injecting an `on post-fs-data` block into init.rc and running `ksud post-fs-data`; this kernel includes the required patch. Root grant and modules are separate paths — working root does not imply working modules, and vice versa. If modules do not work, first verify the manager is UAPI 6 and built from the same source generation as the kernel.
 
 This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
 
