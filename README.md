@@ -27,6 +27,7 @@
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | 内核源码仓库 |
 | `kernel_ref` | `e7dc99d5350d...` | 精确源码提交（取自 ROM 内核版本串 `...-perf-g<sha>`） |
+| `boot_image_url` | 空 | 可选。填入 thyme `boot.img` 的直链后，自动从镜像里推导 `kernel_ref` 与 `input/device.config`（覆盖上两项） |
 | `defconfig` | `thyme_defconfig` | 备用 defconfig（设备配置优先） |
 | `enable_ksu` | `true` | 是否将原版 KernelSU 替换为 KSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next 分支（4.19 非 GKI 必须用此分支） |
@@ -89,6 +90,13 @@
 系统换版后必须重编：ROM 更新会同时改动内核源码提交与 defconfig，旧产物 `Image` 与新版 vendor 内核模块的 `vermagic` / `CONFIG_MODVERSIONS` CRC 不再匹配，直接复用可能仍能开机，但会丢失依赖内核模块的功能。换版后更新 `kernel_ref` 与 `input/device.config`，再触发一次编译即可。
 
 本 workflow 只负责编译，不会接触你的设备。解锁、临时启动、刷入都需要你单独明确授权。
+
+### ROM 换版后怎么做
+
+ROM 更新会同时改变内核源码提交与 defconfig，必须重新编译一次。两种做法：
+
+- **自动（推荐）**：把新系统的 `boot.img` 放到任意可直链下载的位置（例如本仓库的 Release 附件），手动触发 workflow 时把链接填进 `boot_image_url`。工作流会自己从镜像里读出内核提交（`Linux version ...-perf-g<sha>`）和内嵌的 `config.gz`，不需要改任何文件。
+- **手动**：改 `.github/workflows/build.yml` 里 `kernel_ref` 的默认值，并替换 `input/device.config`。
 
 ## 致谢
 
