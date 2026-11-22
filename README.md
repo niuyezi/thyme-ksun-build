@@ -6,7 +6,7 @@
 
 ## 这是干什么的
 
-- 拉取与设备精确匹配的内核源码提交（`fd144b4b...`，内核 `4.19.325-perf`）
+- 拉取与设备精确匹配的内核源码提交（`e7dc99d5350d...`，内核 `4.19.325-perf`）
 - 使用设备自身 `/proc/config.gz` 导出的配置编译
 - 将原版 KernelSU 替换为 KernelSU-Next（`legacy` 分支，内置驱动 —— 这是非 GKI 的 4.19 内核）
 - 为 4.19 内核补上 `reboot` supercall hook，使 UAPI 6 管理器能正常获取驱动 fd 并授予 root
@@ -26,7 +26,7 @@
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | 内核源码仓库 |
-| `kernel_ref` | `fd144b4b278e...` | 精确源码提交（来自设备 `uname`） |
+| `kernel_ref` | `e7dc99d5350d...` | 精确源码提交（来自设备 `uname`） |
 | `defconfig` | `thyme_defconfig` | 备用 defconfig（设备配置优先） |
 | `enable_ksu` | `true` | 是否将原版 KernelSU 替换为 KSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next 分支（4.19 非 GKI 必须用此分支） |
@@ -55,7 +55,7 @@
 | 文件 | 作用 | 来源 |
 |---|---|---|
 | `.github/workflows/build.yml` | 编译工作流 | 本仓库 |
-| `input/device.config` | 编译时使用的内核配置 | 从设备 `/proc/config.gz` 导出（6378 行） |
+| `input/device.config` | 编译时使用的内核配置 | 从设备内核内嵌 `config.gz` 提取（6329 行） |
 | `input/device-ksun.config` | 叠加 KSU 选项后的配置 | 每次运行由 `device.config` 自动生成 |
 | `LICENSE` | 本仓库授权 | 见下方「开源与许可」 |
 
