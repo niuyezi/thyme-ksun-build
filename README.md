@@ -7,7 +7,7 @@
 ## 这是干什么的
 
 - 拉取与设备精确匹配的内核源码提交（`e7dc99d5350d...`，内核 `4.19.325-perf`）
-- 使用设备自身 `/proc/config.gz` 导出的配置编译
+- 使用 ROM 内核镜像内嵌的 `config.gz` 作为编译配置（无需设备在线）
 - 将原版 KernelSU 替换为 KernelSU-Next（`legacy` 分支，内置驱动 —— 这是非 GKI 的 4.19 内核）
 - 为 4.19 内核补上 `reboot` supercall hook，使 UAPI 6 管理器能正常获取驱动 fd 并授予 root
 - 为 `fs/stat.c` 补上 `newfstat` 返回钩子，使 init 能读到注入的 `on post-fs-data` 段，模块系统（overlay 挂载、模块脚本、metamodule）才能生效
@@ -26,7 +26,7 @@
 | 参数 | 默认值 | 说明 |
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | 内核源码仓库 |
-| `kernel_ref` | `e7dc99d5350d...` | 精确源码提交（来自设备 `uname`） |
+| `kernel_ref` | `e7dc99d5350d...` | 精确源码提交（取自 ROM 内核版本串 `...-perf-g<sha>`） |
 | `defconfig` | `thyme_defconfig` | 备用 defconfig（设备配置优先） |
 | `enable_ksu` | `true` | 是否将原版 KernelSU 替换为 KSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next 分支（4.19 非 GKI 必须用此分支） |
@@ -85,6 +85,8 @@
 产物是**裸内核镜像**（`Image` / `dtbo.img`），**不是可直接刷入的 `boot.img`**。要启动或刷入，需用当前系统的原 `boot.img` 重新打包：把 `Image` 定点替换进 kernel 区（通常是 pagesize `4096` 起始，长度为 boot header 中的 `kernel_size`）；新镜像不大于原 `kernel_size` 时尾部补 0；boot header、ramdisk 与末尾的 AVB footer 保持逐字节不变，整体文件大小不变。
 
 模块系统依赖内核向 init.rc 注入 `on post-fs-data` 段并执行 `ksud post-fs-data`，本内核已包含相应补丁。root 授权与模块是两条独立链路——root 正常不代表模块可用，反之亦然。若模块不生效，先确认管理器为 UAPI 6 且与内核同源构建。
+
+系统换版后必须重编：ROM 更新会同时改动内核源码提交与 defconfig，旧产物 `Image` 与新版 vendor 内核模块的 `vermagic` / `CONFIG_MODVERSIONS` CRC 不再匹配，直接复用可能仍能开机，但会丢失依赖内核模块的功能。换版后更新 `kernel_ref` 与 `input/device.config`，再触发一次编译即可。
 
 本 workflow 只负责编译，不会接触你的设备。解锁、临时启动、刷入都需要你单独明确授权。
 
