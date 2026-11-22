@@ -9,6 +9,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 - Pulls the exact kernel source commit matching the device (`fd144b4b...`, kernel `4.19.325-perf`)
 - Builds with the device's own `/proc/config.gz` config
 - Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
+- Adds a `reboot` supercall hook for 4.19 so a UAPI 6 manager can obtain the driver fd and grant root
 - Outputs the kernel image, build log, and SHA-256 checksums
 
 ## How to use
@@ -35,8 +36,16 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 
 | Artifact | Contents |
 |---|---|
-| `thyme-pixelos-ksun` | `Image`, `Image.gz`, `*.dtb`, `dtbo.img`, `.config`, checksums, build log |
+| `thyme-pixelos-ksun` | `Image`, `*.dtb`, `dtbo.img`, `final-defconfig.config`, `artifacts.sha256`, build log |
 | `thyme-build-logs` | Build log + diagnostics (also uploaded on failure) |
+
+## Companion manager
+
+This kernel bundles the KernelSU-Next `legacy` driver, which declares **UAPI 6**. The manager must also be UAPI 6 for root grants to work:
+
+- Use the regular (not spoofed) manager from a **dev-branch CI build** of KernelSU-Next (e.g. `v3.4.2-200-g32e25d58`, versionCode `33555-6`).
+- Do **not** use the Release managers `v3.4.0` / `v3.4.1` / `v3.4.2` (UAPI 4 / 5 / 5 respectively) — they report a version mismatch and cannot grant root.
+- Download from: KernelSU-Next repo → **Actions** → a dev-branch run → the **`manager`** artifact (not `manager-spoofed`).
 
 ## Referenced files and sources
 
@@ -72,7 +81,7 @@ The workflow and scripts in this repo are licensed under [MIT](LICENSE). Referen
 
 ## Note
 
-The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack it with your original `boot.img` header (cmdline, pagesize, base, offsets, OS version/patch level) and ramdisk.
+The output is a **bare kernel image** (`Image` / `dtbo.img`), **not a flashable `boot.img`**. To boot or flash it, repack using your current system's original `boot.img`: replace the kernel region in place (start is normally pagesize `4096`, length is `kernel_size` from the boot header); if the new image is smaller than the original `kernel_size`, zero-fill the remainder; keep the boot header, ramdisk, and trailing AVB footer byte-for-byte identical, and keep the total file size unchanged.
 
 This workflow only builds — it never touches your device. Unlocking, temporary boot, and flashing each need your separate authorization.
 
@@ -83,5 +92,5 @@ This workflow only builds — it never touches your device. Unlocking, temporary
 - **johnmart19** and everyone who worked on the sm8250 platform — kernel support
 - **LineageOS** official maintainers for sm8250 — device and kernel baseline
 - **PixelOS team** — ROM foundation
-- **KernelSU / KernelSU-Next team and community** (tiann and contributors) — root solution
+- **KernelSU / KernelSU-Next team and community** (tiann, rifsxd, and contributors) — root solution; the reboot hook is based on official issue #1053 and the backslashxx manual-hooks work
 - **AOSP / Google** — Android source, Clang toolchain, and `libufdt`
