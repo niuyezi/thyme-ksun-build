@@ -6,7 +6,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 
 ## What it does
 
-- Pulls the exact kernel source commit matching the device (`fd144b4b...`, kernel `4.19.325-perf`)
+- Pulls the exact kernel source commit matching the device (`e7dc99d5350d...`, kernel `4.19.325-perf`)
 - Builds with the device's own `/proc/config.gz` config
 - Replaces the stock KernelSU with KernelSU-Next (`legacy` branch, built in — this is a non-GKI 4.19 kernel)
 - Adds a `reboot` supercall hook for 4.19 so a UAPI 6 manager can obtain the driver fd and grant root
@@ -26,7 +26,7 @@ Build a **KernelSU-Next** kernel for the Xiaomi Mi 10S (`thyme`, SM8250 / Snapdr
 | Parameter | Default | Meaning |
 |---|---|---|
 | `kernel_repo` | `Flicker-Android-Devices/kernel_xiaomi_sm8250` | Kernel source repo |
-| `kernel_ref` | `fd144b4b278e...` | Exact source commit (from device `uname`) |
+| `kernel_ref` | `e7dc99d5350d...` | Exact source commit (from device `uname`) |
 | `defconfig` | `thyme_defconfig` | Fallback defconfig (device config takes priority) |
 | `enable_ksu` | `true` | Replace stock KernelSU with KernelSU-Next |
 | `ksun_ref` | `legacy` | KernelSU-Next branch (required for 4.19 non-GKI) |
@@ -55,7 +55,7 @@ This kernel bundles the KernelSU-Next `legacy` driver, which declares **UAPI 6**
 | File | Role | Origin |
 |---|---|---|
 | `.github/workflows/build.yml` | Build workflow | This repo |
-| `input/device.config` | Kernel config used for the build | Exported from the device's `/proc/config.gz` (6378 lines) |
+| `input/device.config` | Kernel config used for the build | Extracted from the device kernel's embedded `config.gz` (6329 lines) |
 | `input/device-ksun.config` | Config with KSU options layered on | Regenerated from `device.config` on every run |
 | `LICENSE` | Repo license | See "Open source & licensing" below |
 
